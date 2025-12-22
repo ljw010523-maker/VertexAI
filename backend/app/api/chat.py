@@ -18,13 +18,16 @@ from app.models.chat_log import ChatLog
 from app.utils.config import settings
 from app.services.security_filter import security_filter
 
+# from app.services.vertex_ai_service import vertex_ai_service  # Vertex AI용 (나중에 사용)
+from app.services.gemini_api_service import gemini_service  # 테스트용 Gemini API
+
 
 # ========================================
 # APIRouter 생성 (라우터 = 엔드포인트 그룹)
 # ========================================
 router = APIRouter(
     prefix="/chat",  # 모든 엔드포인트 앞에 /chat 붙음
-    tags=["Chat"],   # Swagger에서 그룹 이름
+    tags=["Chat"],  # Swagger에서 그룹 이름
 )
 
 
@@ -41,12 +44,13 @@ class ChatRequest(BaseModel):
         "message": "안녕하세요"
     }
     """
+
     user_id: str = Field(
         ...,  # 필수 항목
         min_length=1,
         max_length=50,
         description="사용자 ID (1~50자)",
-        examples=["user123"]
+        examples=["user123"],
     )
 
     message: str = Field(
@@ -54,16 +58,14 @@ class ChatRequest(BaseModel):
         min_length=1,
         max_length=2000,
         description="사용자 메시지 (1~2000자)",
-        examples=["Vertex AI에 대해 알려줘"]
+        examples=["Vertex AI에 대해 알려줘"],
     )
 
     class Config:
         """Pydantic 설정"""
+
         json_schema_extra = {
-            "example": {
-                "user_id": "user123",
-                "message": "Vertex AI에 대해 알려줘"
-            }
+            "example": {"user_id": "user123", "message": "Vertex AI에 대해 알려줘"}
         }
 
 
@@ -79,38 +81,36 @@ class ChatResponse(BaseModel):
         "timestamp": "2024-01-01T12:00:00"
     }
     """
+
     response: str = Field(
         ...,
         description="AI 응답 메시지",
-        examples=["Vertex AI는 구글의 머신러닝 플랫폼입니다."]
+        examples=["Vertex AI는 구글의 머신러닝 플랫폼입니다."],
     )
 
     filtered: bool = Field(
         default=False,
         description="보안 필터링 여부 (True면 필터링됨)",
-        examples=[False]
+        examples=[False],
     )
 
-    log_id: int = Field(
-        ...,
-        description="저장된 로그의 DB ID",
-        examples=[1]
-    )
+    log_id: int = Field(..., description="저장된 로그의 DB ID", examples=[1])
 
     timestamp: str = Field(
         ...,
         description="응답 생성 시각 (ISO 8601 형식)",
-        examples=["2024-01-01T12:00:00.000Z"]
+        examples=["2024-01-01T12:00:00.000Z"],
     )
 
     class Config:
         """Pydantic 설정"""
+
         json_schema_extra = {
             "example": {
                 "response": "Vertex AI는 구글의 머신러닝 플랫폼입니다.",
                 "filtered": False,
                 "log_id": 1,
-                "timestamp": "2024-01-01T12:00:00.000Z"
+                "timestamp": "2024-01-01T12:00:00.000Z",
             }
         }
 
@@ -147,9 +147,8 @@ async def chat(
     if len(request.message) > settings.MAX_MESSAGE_LENGTH:
         raise HTTPException(
             status_code=400,
-            detail=f"메시지가 너무 깁니다 (최대 {settings.MAX_MESSAGE_LENGTH}자)"
+            detail=f"메시지가 너무 깁니다 (최대 {settings.MAX_MESSAGE_LENGTH}자)",
         )
-
 
     # ========================================
     # 2. 보안 필터링
@@ -165,18 +164,20 @@ async def chat(
         print(f"[SECURITY] 감지된 항목: {', '.join(filter_result.detected_items)}")
         print(f"[SECURITY] 사유: {filter_result.reason}")
 
-
     # ========================================
-    # 3. AI 응답 생성 (현재는 더미 응답)
+    # 3. AI 응답 생성 (Vertex AI)
     # ========================================
     # 금지 키워드가 감지되었다면 차단
     if filtered:
-        ai_response = "죄송합니다. 보안 정책에 위배되는 내용이 포함되어 있어 응답할 수 없습니다."
+        ai_response = (
+            "죄송합니다. 보안 정책에 위배되는 내용이 포함되어 있어 응답할 수 없습니다."
+        )
     else:
-        # TODO: Vertex AI 호출로 교체
-        # 마스킹된 메시지를 AI에 전달 (개인정보 보호)
-        ai_response = f"[더미 응답] '{filtered_message}'에 대한 답변입니다. (나중에 Vertex AI로 교체 예정)"
-
+        # Gemini API 호출 (마스킹된 메시지 전달 - 개인정보 보호)
+        ai_response = await gemini_service.generate_response(
+            message=filtered_message,
+            user_id=request.user_id,
+        )
 
     # ========================================
     # 4. DB에 로그 저장
@@ -197,16 +198,14 @@ async def chat(
         await db.commit()
         await db.refresh(chat_log)
 
-        print(f"[OK] 채팅 로그 저장 완료! (log_id={chat_log.id}, user={request.user_id})")
+        print(
+            f"[OK] 채팅 로그 저장 완료! (log_id={chat_log.id}, user={request.user_id})"
+        )
 
     except Exception as e:
         await db.rollback()
         print(f"[ERROR] DB 저장 실패: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="채팅 로그 저장에 실패했습니다"
-        )
-
+        raise HTTPException(status_code=500, detail="채팅 로그 저장에 실패했습니다")
 
     # ========================================
     # 5. 응답 반환
@@ -257,12 +256,9 @@ async def get_chat_history(
         return {
             "user_id": user_id,
             "count": len(logs),
-            "history": [log.to_dict() for log in logs]
+            "history": [log.to_dict() for log in logs],
         }
 
     except Exception as e:
         print(f"[ERROR] 기록 조회 실패: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="채팅 기록 조회에 실패했습니다"
-        )
+        raise HTTPException(status_code=500, detail="채팅 기록 조회에 실패했습니다")

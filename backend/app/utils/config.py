@@ -35,6 +35,14 @@ class Settings(BaseSettings):
 
 
     # ========================================
+    # Google Gemini API 설정 (테스트용)
+    # ========================================
+    GEMINI_API_KEY: Optional[str] = None
+    # Gemini API 키 (aistudio.google.com에서 발급)
+    # 없으면 더미 모드로 작동
+
+
+    # ========================================
     # Google Vertex AI 설정 (선택사항)
     # ========================================
     GOOGLE_CLOUD_PROJECT: Optional[str] = None
