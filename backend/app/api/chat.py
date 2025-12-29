@@ -41,7 +41,8 @@ class ChatRequest(BaseModel):
     프론트엔드에서 보내는 JSON 형식:
     {
         "user_id": "user123",
-        "message": "안녕하세요"
+        "message": "안녕하세요",
+        "use_context": true
     }
     """
 
@@ -61,11 +62,30 @@ class ChatRequest(BaseModel):
         examples=["Vertex AI에 대해 알려줘"],
     )
 
+    use_context: bool = Field(
+        default=True,  # 기본값: 컨텍스트 사용
+        description="이전 대화 컨텍스트 사용 여부",
+        examples=[True],
+    )
+
+    context_limit: int = Field(
+        default=10,  # 최근 10개 대화 사용 (더 긴 기억)
+        ge=1,  # 최소 1
+        le=50,  # 최대 50 (긴 대화도 지원)
+        description="포함할 이전 대화 개수 (1~50)",
+        examples=[10],
+    )
+
     class Config:
         """Pydantic 설정"""
 
         json_schema_extra = {
-            "example": {"user_id": "user123", "message": "Vertex AI에 대해 알려줘"}
+            "example": {
+                "user_id": "user123",
+                "message": "Vertex AI에 대해 알려줘",
+                "use_context": True,
+                "context_limit": 10,
+            }
         }
 
 
@@ -165,7 +185,41 @@ async def chat(
         print(f"[SECURITY] 사유: {filter_result.reason}")
 
     # ========================================
-    # 3. AI 응답 생성 (Vertex AI)
+    # 3. 이전 대화 가져오기 (컨텍스트)
+    # ========================================
+    conversation_history = []
+
+    if request.use_context:
+        # DB에서 최근 대화 가져오기
+        from sqlalchemy import select
+
+        stmt = (
+            select(ChatLog)
+            .where(ChatLog.user_id == request.user_id)
+            .order_by(ChatLog.created_at.desc())
+            .limit(request.context_limit)
+        )
+        result = await db.execute(stmt)
+        recent_chats = result.scalars().all()
+
+        # 시간 순서대로 정렬 (오래된 것부터)
+        recent_chats = list(reversed(recent_chats))
+
+        # Gemini API 형식으로 변환
+        for chat in recent_chats:
+            conversation_history.append({
+                "role": "user",
+                "parts": [chat.message]
+            })
+            conversation_history.append({
+                "role": "model",
+                "parts": [chat.response]
+            })
+
+        print(f"[CONTEXT] {len(recent_chats)}개의 이전 대화 로드됨")
+
+    # ========================================
+    # 4. AI 응답 생성 (Vertex AI)
     # ========================================
     # 금지 키워드가 감지되었다면 차단
     if filtered:
@@ -173,11 +227,20 @@ async def chat(
             "죄송합니다. 보안 정책에 위배되는 내용이 포함되어 있어 응답할 수 없습니다."
         )
     else:
-        # Gemini API 호출 (마스킹된 메시지 전달 - 개인정보 보호)
-        ai_response = await gemini_service.generate_response(
-            message=filtered_message,
-            user_id=request.user_id,
-        )
+        # Gemini API 호출 (컨텍스트 포함)
+        if conversation_history:
+            # 컨텍스트가 있으면 히스토리와 함께 전달
+            ai_response = await gemini_service.generate_response_with_context(
+                message=filtered_message,
+                conversation_history=conversation_history,
+                user_id=request.user_id,
+            )
+        else:
+            # 컨텍스트 없으면 일반 응답
+            ai_response = await gemini_service.generate_response(
+                message=filtered_message,
+                user_id=request.user_id,
+            )
 
     # ========================================
     # 4. DB에 로그 저장
