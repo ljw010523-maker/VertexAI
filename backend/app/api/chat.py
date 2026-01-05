@@ -20,6 +20,7 @@ from app.services.security_filter import security_filter
 
 # from app.services.vertex_ai_service import vertex_ai_service  # Vertex AI용 (나중에 사용)
 from app.services.gemini_api_service import gemini_service  # 테스트용 Gemini API
+from app.services.rag_service import rag_service  # RAG 검색 서비스
 
 
 # ========================================
@@ -185,7 +186,29 @@ async def chat(
         print(f"[SECURITY] 사유: {filter_result.reason}")
 
     # ========================================
-    # 3. 이전 대화 가져오기 (컨텍스트)
+    # 3. RAG 문서 검색 (의미 기반 검색)
+    # ========================================
+    relevant_documents = []
+
+    try:
+        # RAG 서비스 초기화 (처음 한번만 실행됨)
+        if not rag_service.is_initialized:
+            rag_service.initialize()
+
+        # 관련 문서 검색 (다국어 지원)
+        if rag_service.is_initialized:
+            relevant_documents = rag_service.search(filtered_message, k=3)
+
+            if relevant_documents:
+                print(f"[RAG] {len(relevant_documents)}개의 관련 문서 검색됨")
+            else:
+                print(f"[RAG] 관련 문서 없음 (벡터 DB가 비어있을 수 있음)")
+    except Exception as e:
+        print(f"[RAG] 검색 실패: {e}")
+        # RAG 검색 실패해도 계속 진행 (일반 채팅으로 동작)
+
+    # ========================================
+    # 4. 이전 대화 가져오기 (컨텍스트)
     # ========================================
     conversation_history = []
 
@@ -207,19 +230,13 @@ async def chat(
 
         # Gemini API 형식으로 변환
         for chat in recent_chats:
-            conversation_history.append({
-                "role": "user",
-                "parts": [chat.message]
-            })
-            conversation_history.append({
-                "role": "model",
-                "parts": [chat.response]
-            })
+            conversation_history.append({"role": "user", "parts": [chat.message]})
+            conversation_history.append({"role": "model", "parts": [chat.response]})
 
         print(f"[CONTEXT] {len(recent_chats)}개의 이전 대화 로드됨")
 
     # ========================================
-    # 4. AI 응답 생성 (Vertex AI)
+    # 5. AI 응답 생성 (RAG + 컨텍스트)
     # ========================================
     # 금지 키워드가 감지되었다면 차단
     if filtered:
@@ -227,18 +244,41 @@ async def chat(
             "죄송합니다. 보안 정책에 위배되는 내용이 포함되어 있어 응답할 수 없습니다."
         )
     else:
+        # RAG 문서가 있으면 메시지에 추가
+        enhanced_message = filtered_message
+
+        if relevant_documents:
+            # 문서를 프롬프트에 포함
+            doc_context = "\n\n".join(
+                [
+                    f"[참고 문서 {i+1}]\n{doc}"
+                    for i, doc in enumerate(relevant_documents)
+                ]
+            )
+
+            enhanced_message = f"""다음 참고 문서를 바탕으로 사용자 질문에 답변해주세요.
+
+참고 문서:
+{doc_context}
+
+사용자 질문: {filtered_message}
+
+답변 시 참고 문서의 내용을 활용하되, 자연스럽게 답변해주세요."""
+
+            print(f"[RAG] 문서 컨텍스트 포함된 프롬프트 생성 완료")
+
         # Gemini API 호출 (컨텍스트 포함)
         if conversation_history:
             # 컨텍스트가 있으면 히스토리와 함께 전달
             ai_response = await gemini_service.generate_response_with_context(
-                message=filtered_message,
+                message=enhanced_message,
                 conversation_history=conversation_history,
                 user_id=request.user_id,
             )
         else:
             # 컨텍스트 없으면 일반 응답
             ai_response = await gemini_service.generate_response(
-                message=filtered_message,
+                message=enhanced_message,
                 user_id=request.user_id,
             )
 
@@ -325,3 +365,53 @@ async def get_chat_history(
     except Exception as e:
         print(f"[ERROR] 기록 조회 실패: {e}")
         raise HTTPException(status_code=500, detail="채팅 기록 조회에 실패했습니다")
+
+
+# ========================================
+# 채팅 기록 삭제 엔드포인트
+# ========================================
+@router.delete(
+    "/history/{log_id}",
+    summary="채팅 기록 삭제",
+    description="특정 채팅 로그를 삭제합니다.",
+)
+async def delete_chat_log(
+    log_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    채팅 기록 삭제
+
+    Parameters:
+    - log_id: 삭제할 채팅 로그 ID
+    """
+    from sqlalchemy import select, delete
+
+    try:
+        # 해당 로그가 존재하는지 확인
+        stmt = select(ChatLog).where(ChatLog.id == log_id)
+        result = await db.execute(stmt)
+        log = result.scalar_one_or_none()
+
+        if not log:
+            raise HTTPException(status_code=404, detail="해당 채팅 기록을 찾을 수 없습니다")
+
+        # 로그 삭제
+        delete_stmt = delete(ChatLog).where(ChatLog.id == log_id)
+        await db.execute(delete_stmt)
+        await db.commit()
+
+        print(f"[OK] 채팅 로그 삭제 완료: ID={log_id}")
+
+        return {
+            "success": True,
+            "message": "채팅 기록이 삭제되었습니다",
+            "deleted_id": log_id,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] 기록 삭제 실패: {e}")
+        await db.rollback()
+        raise HTTPException(status_code=500, detail="채팅 기록 삭제에 실패했습니다")

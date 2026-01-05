@@ -106,11 +106,16 @@ async def health_check():
 # ========================================
 # API 라우터 등록
 # ========================================
-from app.api import chat
+from app.api import chat, documents
 
 app.include_router(
     chat.router,
     prefix="/api",  # /api/chat 경로로 등록
+)
+
+app.include_router(
+    documents.router,
+    prefix="/api",  # /api/documents 경로로 등록
 )
 
 

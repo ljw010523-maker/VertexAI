@@ -28,6 +28,10 @@ credentials.json
 *.sqlite3
 chat_logs.db
 
+# RAG 벡터 DB 및 문서
+chroma_db/
+backend/documents/
+
 # ========================================
 # IDE 관련
 # ========================================
